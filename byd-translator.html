@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>مترجم BYD الصوتي</title>
+<style>
+:root{--bg:#fff;--fg:#1a1a1a;--card:#f2f4f7;--ac:#0b6bcb}
+@media (prefers-color-scheme:dark){:root{--bg:#14171c;--fg:#eee;--card:#222831;--ac:#5aa9ff}}
+body{margin:0;font-family:system-ui,Tahoma,sans-serif;background:var(--bg);color:var(--fg);padding:20px;max-width:720px;margin:auto}
+button{font-size:20px;padding:14px 28px;border:0;border-radius:12px;background:var(--ac);color:#fff;cursor:pointer}
+#st{font-size:26px;margin:18px 0;padding:18px;background:var(--card);border-radius:12px;text-align:center}
+#log{background:var(--card);border-radius:12px;padding:12px;max-height:340px;overflow:auto;line-height:1.8}
+input[type=text]{width:70%;padding:10px;font-size:16px}
+small{opacity:.75}
+</style>
+</head>
+<body>
+<h2>مترجم BYD الصوتي</h2>
+<button id="go">▶ تشغيل</button>
+<div id="st">اضغط «تشغيل» مرة واحدة ثم اترك الصفحة مفتوحة</div>
+<p>الانتظار بعد التحية: <b id="wv">2.0</b> ثانية
+<input type="range" id="wait" min="5" max="50" value="20"></p>
+<p><small>قل: «بي واي دي» ← «أنا جاهز» ← الأمر. أو «بي واي دي افتح نافذة السائق» دفعة واحدة. وقل «كرر» لإعادة آخر أمر.</small></p>
+<p><input type="text" id="t" placeholder="جرّب أمرًا كتابةً (بدون ميكروفون)"> <button id="tb" style="font-size:16px;padding:8px 16px">إرسال</button></p>
+<div id="log"></div>
+<script>
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+const $ = id => document.getElementById(id);
+const GREETING = '你好，比亚迪';
+let running = false, last = null;
+const log = t => { const d = document.createElement('div'); d.textContent = t; $('log').prepend(d); };
+const st = m => $('st').textContent = m;
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+$('wait').oninput = e => $('wv').textContent = (e.target.value / 10).toFixed(1);
+const waitMs = () => $('wait').value * 100;
+
+// ===== القاموس: المجموعات يجب أن تتحقق كلها، و"|" تعني أي كلمة. الأخصّ أولًا =====
+const DICT = [
+ [['افتح','سائق','نافذ|شباك'],'打开主驾车窗'],
+ [['اغلق|سكر','سائق','نافذ|شباك'],'关闭主驾车窗'],
+ [['افتح','راكب|مرافق','نافذ|شباك'],'打开副驾车窗'],
+ [['اغلق|سكر','راكب|مرافق','نافذ|شباك'],'关闭副驾车窗'],
+ [['افتح','جميع|كل','نوافذ|شبابيك'],'打开所有车窗'],
+ [['اغلق|سكر','جميع|كل','نوافذ|شبابيك'],'关闭所有车窗'],
+ [['افتح','سقف|فتحه'],'打开天窗'],
+ [['اغلق|سكر','سقف|فتحه'],'关闭天窗'],
+ [['شغل|افتح','مكيف|تكييف'],'打开空调'],
+ [['اطفي|اغلق|ايقاف','مكيف|تكييف'],'关闭空调'],
+ [['صندوق|شنطه'],'打开后备箱'],
+ [['تدفئه|تسخين','مقعد|كرسي'],'打开座椅加热'],
+ [['شغل|افتح','اضواء|انوار|اضاءه'],'打开大灯'],
+ [['اقفل|قفل','ابواب|سياره'],'锁车'],
+ [['شغل','موسيقي|اغاني'],'播放音乐'],
+ [['وقف|اوقف|ايقاف','موسيقي|اغاني'],'暂停音乐'],
+ [['ارفع|زود|علي','صوت'],'调大音量'],
+ [['اخفض|قلل|وطي','صوت'],'调小音量'],
+ [['بيت|منزل'],'导航回家'],
+];
+const norm = s => s.toLowerCase().replace(/[أإآ]/g,'ا').replace(/ة/g,'ه').replace(/ى/g,'ي').replace(/[\u064B-\u0652]/g,'').trim();
+const WAKE = ['بيوايدي','بيويدي','بياي دي','byd','بي واي دي'];
+const isWake = n => { const m = n.replace(/\s/g,''); return WAKE.some(w => m.includes(w.replace(/\s/g,''))); };
+const isRepeat = n => /كرر|اعد/.test(n) && n.length <= 25;
+function toZh(text){
+  const n = norm(text), d = n.match(/\d{2}/);
+  if (d && /درجه|حراره/.test(n)) return `空调温度调到${d[0]}度`;
+  const hit = DICT.find(([g]) => g.every(x => x.split('|').some(w => n.includes(w))));
+  return hit ? hit[1] : null;
+}
+
+// ===== صوت ونطق =====
+function speak(t, lang){
+  return new Promise(res => {
+    const u = new SpeechSynthesisUtterance(t); u.lang = lang;
+    const v = speechSynthesis.getVoices().find(v => v.lang.replace('_','-').startsWith(lang));
+    if (v) u.voice = v;
+    u.onend = u.onerror = res; speechSynthesis.speak(u);
+  });
+}
+function listen(lang, timeout = 0){
+  return new Promise(res => {
+    const r = new SR(); r.lang = lang; r.interimResults = false;
+    let done = false, tm = 0;
+    const fin = v => { if (done) return; done = true; clearTimeout(tm); res(v); };
+    if (timeout) tm = setTimeout(() => { try { r.stop(); } catch(e){} }, timeout);
+    r.onresult = e => fin(e.results[0][0].transcript);
+    r.onerror = () => fin(null); r.onend = () => fin(null);
+    try { r.start(); } catch(e){ fin(null); }
+  });
+}
+
+// ===== الترجمة: مترجم كروم المدمج إن وُجد، وإلا خدمة MyMemory =====
+const cache = {};
+async function translate(t, from, to){
+  try {
+    if ('Translator' in self) {
+      const k = from + to;
+      cache[k] ??= await Translator.create({ sourceLanguage: from, targetLanguage: to });
+      return await cache[k].translate(t);
+    }
+  } catch(e){}
+  const q = encodeURIComponent(t), lp = from + '|' + (to === 'zh' ? 'zh-CN' : to);
+  const j = await (await fetch(`https://api.mymemory.translated.net/get?q=${q}&langpair=${lp}`)).json();
+  return j.responseData.translatedText;
+}
+
+// ===== إرسال الأمر للسيارة =====
+async function send(zh){
+  last = zh; log('➡️ ' + zh); st('أحيّي السيارة…');
+  await speak(GREETING, 'zh-CN');
+  await sleep(waitMs());
+  st('أنطق الأمر: ' + zh);
+  await speak(zh, 'zh-CN');
+  st('أستمع لرد السيارة…');
+  const heard = [];
+  for (let i = 0; i < 3; i++) {
+    const t = await listen('zh-CN', i ? 3000 : 8000);
+    if (!t) break;
+    heard.push(t);
+  }
+  if (!heard.length) {
+    log('⚠️ لم أسمع ردًا من السيارة');
+    await speak('لم أسمع رد السيارة. قل كرر لإعادة الأمر', 'ar-SA');
+    return;
+  }
+  for (const t of heard) {
+    let ar = ''; try { ar = await translate(t, 'zh', 'ar'); } catch(e){ ar = '(تعذّرت الترجمة)'; }
+    log(`🚗 ${t}\n   ← ${ar}`); await speak(ar, 'ar-SA');
+  }
+}
+async function resolveCmd(text){
+  const zh = toZh(text);
+  if (zh) return zh;
+  try { return await translate(text, 'ar', 'zh'); } catch(e){ return null; }
+}
+
+// ===== الحلقة الرئيسية =====
+async function loop(){
+  while (running) {
+    st('🎧 قل «بي واي دي»…');
+    const t = await listen('ar-SA');
+    if (!running) break;
+    if (!t) continue;
+    log('🎤 ' + t);
+    const n = norm(t);
+    if (isRepeat(n) && last) { await send(last); continue; }
+    if (!isWake(n)) continue;
+    let zh = toZh(t);
+    if (!zh) {
+      await speak('أنا جاهز', 'ar-SA');
+      st('🎙️ تكلّم بالأمر…');
+      const c = await listen('ar-SA', 8000);
+      if (!c) continue;
+      log('🎤 ' + c);
+      if (isRepeat(norm(c)) && last) { await send(last); continue; }
+      zh = await resolveCmd(c);
+    }
+    if (zh) await send(zh);
+  }
+  st('متوقف');
+}
+
+$('go').onclick = async () => {
+  if (!SR) { st('استخدم متصفح Chrome'); return; }
+  if (running) { running = false; speechSynthesis.cancel(); $('go').textContent = '▶ تشغيل'; return; }
+  running = true; $('go').textContent = '⏹ إيقاف';
+  speechSynthesis.getVoices();
+  setTimeout(() => { if (!speechSynthesis.getVoices().some(v => v.lang.startsWith('zh'))) log('⚠️ لا يوجد صوت صيني في المتصفح/النظام'); }, 800);
+  try { await translate('مرحبا', 'ar', 'zh'); } catch(e){ log('⚠️ الترجمة الآلية غير متاحة الآن (القاموس يعمل)'); }
+  loop();
+};
+$('tb').onclick = async () => {
+  const t = $('t').value.trim(); if (!t) return;
+  if (isRepeat(norm(t)) && last) return send(last);
+  const zh = await resolveCmd(t); if (zh) send(zh);
+};
+</script>
+</body>
+</html>
