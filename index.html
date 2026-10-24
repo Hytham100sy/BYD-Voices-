@@ -5,61 +5,119 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>مترجم BYD الصوتي</title>
 <style>
-:root{--bg:#fff;--fg:#1a1a1a;--card:#f2f4f7;--ac:#0b6bcb}
-@media (prefers-color-scheme:dark){:root{--bg:#14171c;--fg:#eee;--card:#222831;--ac:#5aa9ff}}
-body{margin:0;font-family:system-ui,Tahoma,sans-serif;background:var(--bg);color:var(--fg);padding:20px;max-width:720px;margin:auto}
-button{font-size:20px;padding:14px 28px;border:0;border-radius:12px;background:var(--ac);color:#fff;cursor:pointer}
-#st{font-size:26px;margin:18px 0;padding:18px;background:var(--card);border-radius:12px;text-align:center}
-#log{background:var(--card);border-radius:12px;padding:12px;max-height:340px;overflow:auto;line-height:1.8}
-input[type=text]{width:70%;padding:10px;font-size:16px}
+:root{--bg:#fff;--fg:#1a1a1a;--card:#f2f4f7;--ac:#0b6bcb;--ok:#1a8f4c;--bad:#c62828}
+@media (prefers-color-scheme:dark){:root{--bg:#14171c;--fg:#eee;--card:#222831;--ac:#5aa9ff;--ok:#3ecf7a;--bad:#ff6b6b}}
+*{box-sizing:border-box}
+body{margin:0;font-family:system-ui,Tahoma,sans-serif;background:var(--bg);color:var(--fg);padding:16px;max-width:760px;margin:auto}
+button{font:inherit;border:0;border-radius:14px;background:var(--ac);color:#fff;cursor:pointer}
+#go{width:100%;font-size:26px;padding:20px}
+#go.on{background:var(--bad)}
+#st{font-size:28px;margin:14px 0;padding:20px;background:var(--card);border-radius:14px;text-align:center;min-height:90px;border:3px solid transparent}
+#st.listen{border-color:var(--ok)}
+#st.speak{border-color:var(--ac)}
+#st.warn{border-color:var(--bad)}
+.row{display:flex;gap:10px;align-items:center;margin:10px 0;flex-wrap:wrap}
+.row input[type=range]{flex:1;min-width:140px}
+#quick{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px;margin:14px 0}
+#quick button{padding:16px 8px;font-size:18px;background:var(--card);color:var(--fg)}
+#log{background:var(--card);border-radius:14px;padding:12px;max-height:300px;overflow:auto;line-height:1.8;white-space:pre-line}
+input[type=text]{flex:1;padding:12px;font-size:17px;border-radius:10px;border:1px solid #8886;background:var(--bg);color:var(--fg)}
+details{margin:10px 0}summary{cursor:pointer;padding:8px 0}
 small{opacity:.75}
 </style>
 </head>
 <body>
 <h2>مترجم BYD الصوتي</h2>
 <button id="go">▶ تشغيل</button>
+<button id="pause" style="width:100%;margin-top:10px;padding:16px;font-size:22px;background:var(--card);color:var(--fg)">⏸ توقف مؤقت (حتى تقول بي واي دي)</button>
 <div id="st">اضغط «تشغيل» مرة واحدة ثم اترك الصفحة مفتوحة</div>
-<p>الانتظار بعد التحية: <b id="wv">2.0</b> ثانية
-<input type="range" id="wait" min="5" max="50" value="20"></p>
-<p><small>قل: «بي واي دي» ← «أنا جاهز» ← الأمر. أو «بي واي دي افتح نافذة السائق» دفعة واحدة. وقل «كرر» لإعادة آخر أمر.</small></p>
-<p><input type="text" id="t" placeholder="جرّب أمرًا كتابةً (بدون ميكروفون)"> <button id="tb" style="font-size:16px;padding:8px 16px">إرسال</button></p>
+<div class="row"><span>الانتظار بعد التحية: <b id="wv">2.0</b> ث</span>
+<input type="range" id="wait" min="5" max="50" value="20"></div>
+<p><small>قل: «بي واي دي» ← «أنا جاهز» ← الأمر. أو «بي واي دي افتح نافذة السائق» دفعة واحدة. «كرر» لإعادة آخر أمر. «توقف» ليصمت التطبيق حتى تقول «بي واي دي» من جديد.</small></p>
+<div id="quick"></div>
+<details><summary>جرّب أمرًا كتابةً</summary>
+<div class="row"><input type="text" id="t" placeholder="مثال: ارفع الحرارة"><button id="tb" style="padding:12px 20px">إرسال</button></div></details>
 <div id="log"></div>
 <script>
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
 const $ = id => document.getElementById(id);
 const GREETING = '你好，比亚迪';
-let running = false, last = null;
+let running = false, asleep = true, last = null, wakeLock = null, lastErr = '';
 const log = t => { const d = document.createElement('div'); d.textContent = t; $('log').prepend(d); };
-const st = m => $('st').textContent = m;
+const st = (m, c='') => { $('st').textContent = m; $('st').className = c; };
 const sleep = ms => new Promise(r => setTimeout(r, ms));
-$('wait').oninput = e => $('wv').textContent = (e.target.value / 10).toFixed(1);
+const store = { get(k,d){ try{ return localStorage.getItem(k) ?? d }catch(e){ return d } }, set(k,v){ try{ localStorage.setItem(k,v) }catch(e){} } };
+
+$('wait').value = store.get('wait', 20);
+$('wv').textContent = ($('wait').value / 10).toFixed(1);
+$('wait').oninput = e => { $('wv').textContent = (e.target.value / 10).toFixed(1); store.set('wait', e.target.value); };
 const waitMs = () => $('wait').value * 100;
 
-// ===== القاموس: المجموعات يجب أن تتحقق كلها، و"|" تعني أي كلمة. الأخصّ أولًا =====
+// ===== القاموس: كل المجموعات يجب أن تتحقق، و"|" تعني أي كلمة. الأخصّ أولًا =====
 const DICT = [
+ // النوافذ والسقف والصندوق
  [['افتح','سائق','نافذ|شباك'],'打开主驾车窗'],
  [['اغلق|سكر','سائق','نافذ|شباك'],'关闭主驾车窗'],
  [['افتح','راكب|مرافق','نافذ|شباك'],'打开副驾车窗'],
  [['اغلق|سكر','راكب|مرافق','نافذ|شباك'],'关闭副驾车窗'],
  [['افتح','جميع|كل','نوافذ|شبابيك'],'打开所有车窗'],
  [['اغلق|سكر','جميع|كل','نوافذ|شبابيك'],'关闭所有车窗'],
+ [['افتح','ستاره|ستار','سقف|فتحه'],'打开天窗遮阳帘'],
  [['افتح','سقف|فتحه'],'打开天窗'],
  [['اغلق|سكر','سقف|فتحه'],'关闭天窗'],
- [['شغل|افتح','مكيف|تكييف'],'打开空调'],
- [['اطفي|اغلق|ايقاف','مكيف|تكييف'],'关闭空调'],
+ [['اغلق|سكر','صندوق|شنطه'],'关闭后备箱'],
  [['صندوق|شنطه'],'打开后备箱'],
+ // المكيف
+ [['ارفع|زود|زيد','حراره|درجه|تدفئه'],'温度调高一点'],
+ [['اخفض|قلل|نزل|وطي','حراره|درجه'],'温度调低一点'],
+ [['ارفع|زود|زيد','مروحه|هواء|تهويه'],'风量调大'],
+ [['اخفض|قلل|نزل|وطي','مروحه|هواء|تهويه'],'风量调小'],
+ [['ازاله|فك|تبخير|ضباب|بخار','خلف'],'打开后挡风玻璃除雾'],
+ [['ازاله|فك|تبخير|ضباب|بخار'],'打开前挡风玻璃除雾'],
+ [['داخلي|تدوير','هواء|دوره|تدوير'],'打开内循环'],
+ [['خارجي','هواء|دوره|تدوير'],'打开外循环'],
+ [['شغل|افتح','مكيف|تكييف'],'打开空调'],
+ [['اطفي|اغلق|ايقاف|وقف','مكيف|تكييف'],'关闭空调'],
+ // المقاعد والمقود
+ [['اطفي|اغلق|ايقاف|وقف','تدفئه|تسخين','مقعد|كرسي'],'关闭座椅加热'],
  [['تدفئه|تسخين','مقعد|كرسي'],'打开座椅加热'],
+ [['تهويه|تبريد','مقعد|كرسي'],'打开座椅通风'],
+ [['تدفئه|تسخين','مقود|عجله|ستيرنج'],'打开方向盘加热'],
+ // الأضواء والمساحات
+ [['اطفي|اغلق|ايقاف|وقف','اضواء|انوار|اضاءه'],'关闭大灯'],
  [['شغل|افتح','اضواء|انوار|اضاءه'],'打开大灯'],
- [['اقفل|قفل','ابواب|سياره'],'锁车'],
+ [['شغل|افتح','طوارئ|فلاشر|الاربع'],'打开双闪'],
+ [['اطفي|اغلق|ايقاف|وقف','طوارئ|فلاشر|الاربع'],'关闭双闪'],
+ [['شغل|افتح','مساحات|ماسحات|مساحه'],'打开雨刮'],
+ [['اطفي|اغلق|ايقاف|وقف','مساحات|ماسحات|مساحه'],'关闭雨刮'],
+ [['شغل|افتح','ديكور|محيطيه|زينه'],'打开氛围灯'],
+ // الأقفال والكاميرا
+ [['افتح|فك','قفل|ابواب|سياره'],'解锁车辆'],
+ [['اقفل|قفل|اغلق','ابواب|سياره'],'锁车'],
+ [['كاميرا|بانوراما|360'],'打开全景影像'],
+ // الوسائط
+ [['التالي|بعدي|غير'],'下一首'],
+ [['السابق|قبل'],'上一首'],
  [['شغل','موسيقي|اغاني'],'播放音乐'],
  [['وقف|اوقف|ايقاف','موسيقي|اغاني'],'暂停音乐'],
- [['ارفع|زود|علي','صوت'],'调大音量'],
- [['اخفض|قلل|وطي','صوت'],'调小音量'],
+ [['كتم|صامت|اسكت'],'静音'],
+ [['ارفع|زود|زيد|علي','صوت'],'调大音量'],
+ [['اخفض|قلل|وطي|نزل','صوت'],'调小音量'],
+ [['ارفع|زود|زيد','سطوع|اضاءه|شاشه'],'屏幕亮度调高'],
+ [['اخفض|قلل|وطي|نزل','سطوع|شاشه'],'屏幕亮度调低'],
+ [['شغل|افتح','راديو'],'打开收音机'],
+ [['شغل|افتح','بلوتوث'],'打开蓝牙'],
+ // الملاحة
+ [['عمل|شغل|دوام|مكتب','وديني|روح|ملاحه|خذني'],'导航去公司'],
  [['بيت|منزل'],'导航回家'],
+ [['افتح|شغل','ملاحه|خريطه|navigation'],'打开导航'],
 ];
-const norm = s => s.toLowerCase().replace(/[أإآ]/g,'ا').replace(/ة/g,'ه').replace(/ى/g,'ي').replace(/[\u064B-\u0652]/g,'').trim();
-const WAKE = ['بيوايدي','بيويدي','بياي دي','byd','بي واي دي'];
+const norm = s => s.toLowerCase()
+  .replace(/[٠-٩]/g, c => '٠١٢٣٤٥٦٧٨٩'.indexOf(c))
+  .replace(/[أإآ]/g,'ا').replace(/ة/g,'ه').replace(/ى/g,'ي').replace(/[\u064B-\u0652]/g,'').trim();
+const WAKE = ['بيوايدي','بيويدي','بياي دي','byd','بي واي دي','بي وي دي','بايدي','بيادي'];
 const isWake = n => { const m = n.replace(/\s/g,''); return WAKE.some(w => m.includes(w.replace(/\s/g,''))); };
+const isStop = n => /توقف|وقف|كفايه|اسكت|الغ|الغاء|نام|خلاص/.test(n) && n.length <= 20;
 const isRepeat = n => /كرر|اعد/.test(n) && n.length <= 25;
 function toZh(text){
   const n = norm(text), d = n.match(/\d{2}/);
@@ -67,6 +125,13 @@ function toZh(text){
   const hit = DICT.find(([g]) => g.every(x => x.split('|').some(w => n.includes(w))));
   return hit ? hit[1] : null;
 }
+
+// ===== أزرار سريعة (للسائق أو الراكب) =====
+const QUICK = [['فتح نافذة السائق','打开主驾车窗'],['إغلاق نافذة السائق','关闭主驾车窗'],
+ ['تشغيل المكيف','打开空调'],['إيقاف المكيف','关闭空调'],['رفع الحرارة','温度调高一点'],['خفض الحرارة','温度调低一点'],
+ ['إزالة الضباب','打开前挡风玻璃除雾'],['فتح الصندوق','打开后备箱'],['تدفئة المقعد','打开座椅加热'],
+ ['موسيقى','播放音乐'],['رفع الصوت','调大音量'],['خفض الصوت','调小音量'],['الملاحة للبيت','导航回家'],['قفل السيارة','锁车']];
+QUICK.forEach(([ar, zh]) => { const b = document.createElement('button'); b.textContent = ar; b.onclick = () => { asleep = false; send(zh); }; $('quick').appendChild(b); });
 
 // ===== صوت ونطق =====
 function speak(t, lang){
@@ -84,12 +149,32 @@ function listen(lang, timeout = 0){
     const fin = v => { if (done) return; done = true; clearTimeout(tm); res(v); };
     if (timeout) tm = setTimeout(() => { try { r.stop(); } catch(e){} }, timeout);
     r.onresult = e => fin(e.results[0][0].transcript);
-    r.onerror = () => fin(null); r.onend = () => fin(null);
+    r.onerror = e => { lastErr = e.error; if (e.error === 'not-allowed') { running = false; st('الميكروفون غير مسموح. فعّله من إعدادات الموقع','warn'); } fin(null); };
+    r.onend = () => fin(null);
     try { r.start(); } catch(e){ fin(null); }
   });
 }
 
-// ===== الترجمة: مترجم كروم المدمج إن وُجد، وإلا خدمة MyMemory =====
+// استماع متواصل: يجمع كل الجمل حتى يسكت المتحدث gapMs أو ينتهي maxMs
+function listenMany(lang, firstMs = 12000, gapMs = 3500){
+  return new Promise(res => {
+    const r = new SR(); r.lang = lang; r.continuous = true; r.interimResults = true;
+    const out = []; let done = false, tm = 0, heardAny = false;
+    const fin = () => { if (done) return; done = true; clearTimeout(tm); try { r.stop(); } catch(e){} res(out); };
+    const arm = ms => { clearTimeout(tm); tm = setTimeout(fin, ms); };
+    arm(firstMs);
+    r.onresult = e => {
+      heardAny = true; arm(gapMs);
+      out.length = 0;
+      for (let i = 0; i < e.results.length; i++) if (e.results[i].isFinal || i === e.results.length - 1) { const t = e.results[i][0].transcript.trim(); if (t) out.push(t); }
+    };
+    r.onerror = e => { lastErr = e.error; if (e.error === 'not-allowed' || e.error === 'audio-capture' || e.error === 'network') fin(); };
+    r.onend = () => { if (!done && !heardAny) { try { r.start(); } catch(e){ fin(); } } else if (!done) fin(); };
+    try { r.start(); } catch(e){ fin(); }
+  });
+}
+
+// ===== الترجمة: مترجم كروم المدمج إن وُجد، وإلا MyMemory =====
 const cache = {};
 async function translate(t, from, to){
   try {
@@ -106,26 +191,26 @@ async function translate(t, from, to){
 
 // ===== إرسال الأمر للسيارة =====
 async function send(zh){
-  last = zh; log('➡️ ' + zh); st('أحيّي السيارة…');
+  last = zh; log('➡️ ' + zh); st('أحيّي السيارة…','speak');
   await speak(GREETING, 'zh-CN');
   await sleep(waitMs());
-  st('أنطق الأمر: ' + zh);
+  st('أنطق الأمر: ' + zh,'speak');
   await speak(zh, 'zh-CN');
-  st('أستمع لرد السيارة…');
-  const heard = [];
-  for (let i = 0; i < 3; i++) {
-    const t = await listen('zh-CN', i ? 3000 : 8000);
-    if (!t) break;
-    heard.push(t);
-  }
+  if (!running) { st('تم إرسال الأمر. اضغط «تشغيل» لمتابعة الاستماع'); return; }
+  if (asleep) return;
+  st('أستمع لرد السيارة…','listen');
+  lastErr = '';
+  const heard = await listenMany('zh-CN', 12000, 3500);
+  if (asleep) return;
   if (!heard.length) {
-    log('⚠️ لم أسمع ردًا من السيارة');
+    log('⚠️ لم أسمع ردًا من السيارة' + (lastErr ? ' (السبب: ' + lastErr + ')' : '')); st('لم أسمع رد السيارة','warn');
     await speak('لم أسمع رد السيارة. قل كرر لإعادة الأمر', 'ar-SA');
     return;
   }
   for (const t of heard) {
+    if (asleep) return;
     let ar = ''; try { ar = await translate(t, 'zh', 'ar'); } catch(e){ ar = '(تعذّرت الترجمة)'; }
-    log(`🚗 ${t}\n   ← ${ar}`); await speak(ar, 'ar-SA');
+    log(`🚗 ${t}\n   ← ${ar}`); st(ar,'speak'); await speak(ar, 'ar-SA');
   }
 }
 async function resolveCmd(text){
@@ -135,44 +220,68 @@ async function resolveCmd(text){
 }
 
 // ===== الحلقة الرئيسية =====
+function goSleep(){
+  asleep = true; speechSynthesis.cancel(); st('😴 صامت. قل «بي واي دي» لإيقاظي','warn'); log('⏸ توقف');
+}
 async function loop(){
   while (running) {
-    st('🎧 قل «بي واي دي»…');
+    st(asleep ? '😴 صامت. قل «بي واي دي» لإيقاظي' : '🎧 قل «بي واي دي»…', asleep ? 'warn' : 'listen');
     const t = await listen('ar-SA');
     if (!running) break;
     if (!t) continue;
     log('🎤 ' + t);
     const n = norm(t);
-    if (isRepeat(n) && last) { await send(last); continue; }
-    if (!isWake(n)) continue;
+    if (!isWake(n)) {
+      if (asleep) continue;
+      if (isStop(n)) { goSleep(); continue; }
+      if (isRepeat(n) && last) { await send(last); }
+      continue;
+    }
+    asleep = false;
     let zh = toZh(t);
     if (!zh) {
       await speak('أنا جاهز', 'ar-SA');
-      st('🎙️ تكلّم بالأمر…');
+      st('🎙️ تكلّم بالأمر…','listen');
       const c = await listen('ar-SA', 8000);
       if (!c) continue;
       log('🎤 ' + c);
-      if (isRepeat(norm(c)) && last) { await send(last); continue; }
+      const cn = norm(c);
+      if (isStop(cn)) { goSleep(); continue; }
+      if (isRepeat(cn) && last) { await send(last); continue; }
       zh = await resolveCmd(c);
+      if (!zh) { st('لم أفهم الأمر','warn'); await speak('لم أفهم الأمر', 'ar-SA'); continue; }
     }
-    if (zh) await send(zh);
+    await send(zh);
   }
   st('متوقف');
 }
 
+// ===== إبقاء الشاشة مضاءة =====
+async function keepAwake(){
+  try { if ('wakeLock' in navigator) wakeLock = await navigator.wakeLock.request('screen'); } catch(e){}
+}
+document.addEventListener('visibilitychange', () => { if (running && document.visibilityState === 'visible') keepAwake(); });
+
 $('go').onclick = async () => {
-  if (!SR) { st('استخدم متصفح Chrome'); return; }
-  if (running) { running = false; speechSynthesis.cancel(); $('go').textContent = '▶ تشغيل'; return; }
-  running = true; $('go').textContent = '⏹ إيقاف';
+  if (!SR) { st('استخدم متصفح Chrome','warn'); return; }
+  if (running) {
+    running = false; speechSynthesis.cancel(); $('go').textContent = '▶ تشغيل'; $('go').classList.remove('on');
+    try { wakeLock && wakeLock.release(); } catch(e){}
+    return;
+  }
+  running = true; asleep = true; $('go').textContent = '⏹ إيقاف'; $('go').classList.add('on');
+  keepAwake();
   speechSynthesis.getVoices();
   setTimeout(() => { if (!speechSynthesis.getVoices().some(v => v.lang.startsWith('zh'))) log('⚠️ لا يوجد صوت صيني في المتصفح/النظام'); }, 800);
   try { await translate('مرحبا', 'ar', 'zh'); } catch(e){ log('⚠️ الترجمة الآلية غير متاحة الآن (القاموس يعمل)'); }
   loop();
 };
+$('pause').onclick = goSleep;
 $('tb').onclick = async () => {
   const t = $('t').value.trim(); if (!t) return;
+  asleep = false;
   if (isRepeat(norm(t)) && last) return send(last);
-  const zh = await resolveCmd(t); if (zh) send(zh);
+  const zh = await resolveCmd(t); if (zh) send(zh); else st('لم أفهم الأمر','warn');
 };
 </script>
 </body>
