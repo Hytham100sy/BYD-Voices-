@@ -33,6 +33,8 @@ small{opacity:.75}
 <div id="st">اضغط «تشغيل» مرة واحدة ثم اترك الصفحة مفتوحة</div>
 <div class="row"><span>الانتظار بعد التحية: <b id="wv">2.0</b> ث</span>
 <input type="range" id="wait" min="5" max="50" value="20"></div>
+<div class="row"><span>الانتظار قبل الاستماع لرد السيارة: <b id="dv">3.0</b> ث</span>
+<input type="range" id="ldelay" min="0" max="80" value="30"></div>
 <p><small>قل: «بي واي دي» ← «أنا جاهز» ← الأمر. أو «بي واي دي افتح نافذة السائق» دفعة واحدة. «كرر» لإعادة آخر أمر. «توقف» ليصمت التطبيق حتى تقول «بي واي دي» من جديد.</small></p>
 <div id="quick"></div>
 <details><summary>جرّب أمرًا كتابةً</summary>
@@ -52,6 +54,10 @@ $('wait').value = store.get('wait', 20);
 $('wv').textContent = ($('wait').value / 10).toFixed(1);
 $('wait').oninput = e => { $('wv').textContent = (e.target.value / 10).toFixed(1); store.set('wait', e.target.value); };
 const waitMs = () => $('wait').value * 100;
+$('ldelay').value = store.get('ldelay', 30);
+$('dv').textContent = ($('ldelay').value / 10).toFixed(1);
+$('ldelay').oninput = e => { $('dv').textContent = (e.target.value / 10).toFixed(1); store.set('ldelay', e.target.value); };
+const listenDelayMs = () => $('ldelay').value * 100;
 
 // ===== القاموس: كل المجموعات يجب أن تتحقق، و"|" تعني أي كلمة. الأخصّ أولًا =====
 const DICT = [
@@ -117,7 +123,7 @@ const norm = s => s.toLowerCase()
   .replace(/[أإآ]/g,'ا').replace(/ة/g,'ه').replace(/ى/g,'ي').replace(/[\u064B-\u0652]/g,'').trim();
 const WAKE = ['بيوايدي','بيويدي','بياي دي','byd','بي واي دي','بي وي دي','بايدي','بيادي'];
 const isWake = n => { const m = n.replace(/\s/g,''); return WAKE.some(w => m.includes(w.replace(/\s/g,''))); };
-const isStop = n => /توقف|وقف|كفايه|اسكت|الغ|الغاء|نام|خلاص/.test(n) && n.length <= 20;
+const isStop = n => /توقف|اسكت|كفايه|الغ|الغاء|خلاص/.test(n) && n.length <= 30;
 const isRepeat = n => /كرر|اعد/.test(n) && n.length <= 25;
 function toZh(text){
   const n = norm(text), d = n.match(/\d{2}/);
@@ -155,6 +161,11 @@ function listen(lang, timeout = 0){
   });
 }
 
+function dedupe(arr){
+  const u = [...new Set(arr.map(x => x.trim()).filter(Boolean))];
+  let r = u.filter((x,i) => !u.some((y,j) => j !== i && y.length > x.length && y.includes(x)));
+  return r.map(x => { const m = x.match(/^(.{2,}?)[\s،,。.]*(?:\1[\s،,。.]*)+$/); return m ? m[1] : x; });
+}
 // استماع متواصل: يجمع كل الجمل حتى يسكت المتحدث gapMs أو ينتهي maxMs
 function listenMany(lang, firstMs = 12000, gapMs = 3500){
   return new Promise(res => {
@@ -200,18 +211,21 @@ async function send(zh){
   if (asleep) return;
   st('أستمع لرد السيارة…','listen');
   lastErr = '';
-  const heard = await listenMany('zh-CN', 12000, 3500);
+  st('أنتظر ثوانٍ ثم أستمع للسيارة…','speak');
+  await sleep(listenDelayMs());
+  if (asleep) return;
+  st('أستمع لرد السيارة…','listen');
+  const heard = dedupe(await listenMany('zh-CN', 12000, 3500));
   if (asleep) return;
   if (!heard.length) {
     log('⚠️ لم أسمع ردًا من السيارة' + (lastErr ? ' (السبب: ' + lastErr + ')' : '')); st('لم أسمع رد السيارة','warn');
     await speak('لم أسمع رد السيارة. قل كرر لإعادة الأمر', 'ar-SA');
     return;
   }
-  for (const t of heard) {
-    if (asleep) return;
-    let ar = ''; try { ar = await translate(t, 'zh', 'ar'); } catch(e){ ar = '(تعذّرت الترجمة)'; }
-    log(`🚗 ${t}\n   ← ${ar}`); st(ar,'speak'); await speak(ar, 'ar-SA');
-  }
+  const zhText = heard.join('，');
+  let ar = ''; try { ar = await translate(zhText, 'zh', 'ar'); } catch(e){ ar = '(تعذّرت الترجمة)'; }
+  log(`🚗 ${zhText}\n   ← ${ar}`); st(ar,'speak'); await speak(ar, 'ar-SA');
+  if (!asleep) st('🎧 قل «بي واي دي»…','listen');
 }
 async function resolveCmd(text){
   const zh = toZh(text);
@@ -231,6 +245,8 @@ async function loop(){
     if (!t) continue;
     log('🎤 ' + t);
     const n = norm(t);
+    const hit = toZh(t);
+    if (isStop(n) && !hit) { goSleep(); continue; }
     if (!isWake(n)) {
       if (asleep) continue;
       if (isStop(n)) { goSleep(); continue; }
