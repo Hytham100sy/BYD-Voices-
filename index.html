@@ -35,7 +35,7 @@ small{opacity:.75}
 <input type="range" id="wait" min="5" max="50" value="20"></div>
 <div class="row"><span>الانتظار قبل الاستماع لرد السيارة: <b id="dv">3.0</b> ث</span>
 <input type="range" id="ldelay" min="0" max="80" value="30"></div>
-<p><small>قل: «بي واي دي» ← «أنا جاهز» ← الأمر. أو «بي واي دي افتح نافذة السائق» دفعة واحدة. «كرر» لإعادة آخر أمر. «توقف» ليصمت التطبيق حتى تقول «بي واي دي» من جديد.</small></p>
+<p><small>قل: «بي واي دي» ← «أنا جاهز» ← الأمر. أو «بي واي دي افتح نافذة السائق» دفعة واحدة. «كرر» لإعادة آخر أمر. «توقف» ليصمت التطبيق حتى تقول «بي واي دي» من جديد. «إنهاء» لإغلاق التطبيق نهائيًا (يلزم الضغط على «تشغيل» لبدئه).</small></p>
 <div id="quick"></div>
 <details><summary>جرّب أمرًا كتابةً</summary>
 <div class="row"><input type="text" id="t" placeholder="مثال: ارفع الحرارة"><button id="tb" style="padding:12px 20px">إرسال</button></div></details>
@@ -123,6 +123,7 @@ const norm = s => s.toLowerCase()
   .replace(/[أإآ]/g,'ا').replace(/ة/g,'ه').replace(/ى/g,'ي').replace(/[\u064B-\u0652]/g,'').trim();
 const WAKE = ['بيوايدي','بيويدي','بياي دي','byd','بي واي دي','بي وي دي','بايدي','بيادي'];
 const isWake = n => { const m = n.replace(/\s/g,''); return WAKE.some(w => m.includes(w.replace(/\s/g,''))); };
+const isEnd = n => /انهاء|انهي|انتهاء|خروج|اخرج/.test(n) && n.length <= 30;
 const isStop = n => /توقف|اسكت|كفايه|الغ|الغاء|خلاص/.test(n) && n.length <= 30;
 const isRepeat = n => /كرر|اعد/.test(n) && n.length <= 25;
 function toZh(text){
@@ -165,6 +166,26 @@ function dedupe(arr){
   const u = [...new Set(arr.map(x => x.trim()).filter(Boolean))];
   let r = u.filter((x,i) => !u.some((y,j) => j !== i && y.length > x.length && y.includes(x)));
   return r.map(x => { const m = x.match(/^(.{2,}?)[\s،,。.]*(?:\1[\s،,。.]*)+$/); return m ? m[1] : x; });
+}
+// انتظار كلمة التنبيه بجلسة واحدة طويلة (أقل إشارات تشغيل/إطفاء للميكروفون)
+let curRec = null;
+function listenWake(){
+  return new Promise(res => {
+    const r = new SR(); curRec = r; r.lang = 'ar-SA'; r.continuous = true; r.interimResults = false;
+    let done = false;
+    const fin = v => { if (done) return; done = true; try { r.abort(); } catch(e){} res(v); };
+    r.onresult = e => {
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        if (!e.results[i].isFinal) continue;
+        const t = e.results[i][0].transcript.trim(); if (!t) continue;
+        const n = norm(t);
+        if (!asleep || isWake(n) || isEnd(n)) { fin(t); return; }
+      }
+    };
+    r.onerror = e => { lastErr = e.error; if (['not-allowed','audio-capture','network'].includes(e.error)) fin(null); };
+    r.onend = () => { if (done) return; if (!running) { fin(null); return; } setTimeout(() => { if (done) return; try { r.start(); } catch(e){ fin(null); } }, 300); };
+    try { r.start(); } catch(e){ fin(null); }
+  });
 }
 // استماع متواصل: يجمع كل الجمل حتى يسكت المتحدث gapMs أو ينتهي maxMs
 function listenMany(lang, firstMs = 12000, gapMs = 3500){
@@ -234,17 +255,24 @@ async function resolveCmd(text){
 }
 
 // ===== الحلقة الرئيسية =====
+function endApp(){
+  running = false; asleep = true; speechSynthesis.cancel(); try { curRec && curRec.abort(); } catch(e){}
+  $('go').textContent = '▶ تشغيل'; $('go').classList.remove('on');
+  try { wakeLock && wakeLock.release(); } catch(e){}
+  st('⏹ تم إنهاء التطبيق. اضغط «تشغيل» لبدئه من جديد','warn'); log('⏹ إنهاء');
+}
 function goSleep(){
   asleep = true; speechSynthesis.cancel(); st('😴 صامت. قل «بي واي دي» لإيقاظي','warn'); log('⏸ توقف');
 }
 async function loop(){
   while (running) {
     st(asleep ? '😴 صامت. قل «بي واي دي» لإيقاظي' : '🎧 قل «بي واي دي»…', asleep ? 'warn' : 'listen');
-    const t = await listen('ar-SA');
+    const t = await listenWake();
     if (!running) break;
-    if (!t) continue;
+    if (!t) { await sleep(500); continue; }
     log('🎤 ' + t);
     const n = norm(t);
+    if (isEnd(n)) { endApp(); break; }
     const hit = toZh(t);
     if (isStop(n) && !hit) { goSleep(); continue; }
     if (!isWake(n)) {
@@ -262,6 +290,7 @@ async function loop(){
       if (!c) continue;
       log('🎤 ' + c);
       const cn = norm(c);
+      if (isEnd(cn)) { endApp(); break; }
       if (isStop(cn)) { goSleep(); continue; }
       if (isRepeat(cn) && last) { await send(last); continue; }
       zh = await resolveCmd(c);
@@ -269,7 +298,7 @@ async function loop(){
     }
     await send(zh);
   }
-  st('متوقف');
+  if (!$('st').textContent.startsWith('⏹')) st('متوقف');
 }
 
 // ===== إبقاء الشاشة مضاءة =====
@@ -280,11 +309,7 @@ document.addEventListener('visibilitychange', () => { if (running && document.vi
 
 $('go').onclick = async () => {
   if (!SR) { st('استخدم متصفح Chrome','warn'); return; }
-  if (running) {
-    running = false; speechSynthesis.cancel(); $('go').textContent = '▶ تشغيل'; $('go').classList.remove('on');
-    try { wakeLock && wakeLock.release(); } catch(e){}
-    return;
-  }
+  if (running) { endApp(); return; }
   running = true; asleep = true; $('go').textContent = '⏹ إيقاف'; $('go').classList.add('on');
   keepAwake();
   speechSynthesis.getVoices();
